@@ -34,5 +34,10 @@ coverage:
 
 install:
 	python3 -m venv .venv
-	.venv/bin/pip install -e .[dev]
-	pre-commit install
+	.venv/bin/python -m ensurepip
+	.venv/bin/pip install --upgrade pip
+	# no setup.py, no -e
+	#.venv/bin/pip install -e .[dev]
+	.venv/bin/pip install .[dev]
+	# wtf this
+	#pre-commit install
