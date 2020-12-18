@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from poethepoet.app import PoeThePoet
 
 from copier import tools
 from copier.config.factory import ConfigData, EnvOps
@@ -8,10 +9,15 @@ from copier.config.factory import ConfigData, EnvOps
 from .helpers import DATA, PROJECT_TEMPLATE
 
 
-def test_render(dst):
+def test_render(tmp_path):
     envops = EnvOps().dict()
     render = tools.Renderer(
-        ConfigData(src_path=PROJECT_TEMPLATE, dst_path=dst, data=DATA, envops=envops)
+        ConfigData(
+            src_path=PROJECT_TEMPLATE,
+            dst_path=tmp_path,
+            data_from_init=DATA,
+            envops=envops,
+        )
     )
 
     assert render.string("/hello/[[ what ]]/") == "/hello/world/"
@@ -55,3 +61,13 @@ path_filter = tools.create_path_filter(TEST_PATTERNS)
 )
 def test_create_path_filter(pattern, should_match):
     assert path_filter(pattern) == should_match
+
+
+def test_lint():
+    """Ensure source code formatting"""
+    PoeThePoet(Path("."))(["lint", "--show-diff-on-failure", "--color=always"])
+
+
+def test_types():
+    """Ensure source code static typing."""
+    PoeThePoet(Path("."))(["types"])

@@ -1,5 +1,6 @@
+"""Utilities related to VCS."""
 import re
-import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from packaging import version
 from plumbum import TF, colors, local
 from plumbum.cmd import git
 
-from .types import OptStr, StrOrPath
+from .types import OptBool, OptStr, StrOrPath
 
 __all__ = ("get_repo", "clone")
 
@@ -25,14 +26,14 @@ def is_git_repo_root(path: Path) -> bool:
     """Indicate if a given path is a git repo root directory."""
     try:
         with local.cwd(path / ".git"):
-            return bool(git("rev-parse", "--is-inside-git-dir") == "true\n")
-    except (FileNotFoundError, NotADirectoryError):
+            return bool(git("rev-parse", "--is-inside-git-dir").strip() == "true")
+    except OSError:
         return False
 
 
 def is_git_bundle(path: Path) -> bool:
     """Indicate if a path is a valid git bundle."""
-    with tempfile.TemporaryDirectory() as dirname:
+    with tempfile.TemporaryDirectory(prefix=f"{__name__}.is_git_bundle.") as dirname:
         with local.cwd(dirname):
             git("init")
             return bool(git["bundle", "verify", path] & TF)
@@ -55,15 +56,29 @@ def get_repo(url: str) -> OptStr:
     return url
 
 
-def checkout_latest_tag(local_repo: StrOrPath) -> str:
-    """Checkout latest git tag and check it out, sorted by PEP 440."""
+def checkout_latest_tag(local_repo: StrOrPath, use_prereleases: OptBool = False) -> str:
+    """Checkout latest git tag and check it out, sorted by PEP 440.
+
+    Parameters:
+        local_repo:
+            A git repository in the local filesystem.
+        use_prereleases:
+            If `False`, skip prerelease git tags.
+    """
     with local.cwd(local_repo):
         all_tags = git("tag").split()
+        if not use_prereleases:
+            all_tags = filter(
+                lambda tag: not version.parse(tag).is_prerelease, all_tags
+            )
         sorted_tags = sorted(all_tags, key=version.parse, reverse=True)
         try:
             latest_tag = str(sorted_tags[0])
         except IndexError:
-            print(colors.warn | "No git tags found in template; using HEAD as ref")
+            print(
+                colors.warn | "No git tags found in template; using HEAD as ref",
+                file=sys.stderr,
+            )
             latest_tag = "HEAD"
         git("checkout", "--force", latest_tag)
         git("submodule", "update", "--checkout", "--init", "--recursive", "--force")
@@ -71,8 +86,7 @@ def checkout_latest_tag(local_repo: StrOrPath) -> str:
 
 
 def clone(url: str, ref: str = "HEAD") -> str:
-    location = tempfile.mkdtemp()
-    shutil.rmtree(location)  # Path must not exist
+    location = tempfile.mkdtemp(prefix=f"{__name__}.clone.")
     git("clone", "--no-checkout", url, location)
     with local.cwd(location):
         git("checkout", ref)

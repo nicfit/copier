@@ -1,5 +1,17 @@
+"""All complex types and annotations are declared here."""
+
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Sequence, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    TypeVar,
+    Union,
+)
 
 # simple types
 StrOrPath = Union[str, Path]
@@ -21,5 +33,8 @@ OptAnyByStrDict = Optional[AnyByStrDict]
 
 # miscellaneous
 CheckPathFunc = Callable[[StrOrPath], bool]
+Choices = Union[List[Any], Dict[Any, Any]]
 T = TypeVar("T")
 JSONSerializable = (dict, list, str, int, float, bool, type(None))
+Filters = Dict[str, Callable]
+LoaderPaths = Union[str, Iterable[str]]

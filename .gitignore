@@ -33,6 +33,7 @@ pip-wheel-metadata
 # Documentation
 */_build/*
 */site/*
+/site
 .mypy_cache/*
 .cache
 *.log
@@ -41,3 +42,11 @@ pip-wheel-metadata
 .vscode
 *.sublime-workspace
 *.sublime-project
+.idea/
+
+# Tests artifacts
+.coverage*
+htmlcov/
+
+# macOS
+.DS_Store

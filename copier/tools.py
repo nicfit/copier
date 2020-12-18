@@ -1,9 +1,13 @@
+"""Some utility functions."""
+
 import errno
 import os
 import shutil
+import sys
 import unicodedata
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, TextIO, Union
 
 import colorama
 import pathspec
@@ -17,8 +21,10 @@ from .config.objects import ConfigData, EnvOps
 from .types import (
     AnyByStrDict,
     CheckPathFunc,
+    Filters,
     IntSeq,
     JSONSerializable,
+    LoaderPaths,
     StrOrPath,
     StrOrPathSeq,
     T,
@@ -49,6 +55,7 @@ def printf(
     style: Optional[IntSeq] = None,
     indent: int = 10,
     quiet: Union[bool, StrictBool] = False,
+    file_: TextIO = sys.stdout,
 ) -> Optional[str]:
     if quiet:
         return None  # HACK: Satisfy MyPy
@@ -58,7 +65,7 @@ def printf(
         return action + _msg
 
     out = style + [action] + Style.RESET + [INDENT, _msg]  # type: ignore
-    print(*out, sep="")
+    print(*out, sep="", file=file_)
     return None  # HACK: Satisfy MyPy
 
 
@@ -66,17 +73,44 @@ def printf_exception(
     e: Exception, action: str, msg: str = "", indent: int = 0, quiet: bool = False
 ) -> None:
     if not quiet:
-        print("")
-        printf(action, msg=msg, style=Style.DANGER, indent=indent)
-        print(HLINE)
-        print(e)
-        print(HLINE)
+        print("", file=sys.stderr)
+        printf(action, msg=msg, style=Style.DANGER, indent=indent, file_=sys.stderr)
+        print(HLINE, file=sys.stderr)
+        print(e, file=sys.stderr)
+        print(HLINE, file=sys.stderr)
 
 
 def required(value: T, **kwargs: Any) -> T:
     if not value:
         raise ValueError()
     return value
+
+
+def cast_str_to_bool(value: Any) -> bool:
+    """Parse anything to bool.
+
+    Params:
+        value:
+            Anything to be casted to a bool. Tries to be as smart as possible.
+
+            1.  Cast to number. Then: 0 = False; anything else = True.
+            1.  Find [YAML booleans](https://yaml.org/type/bool.html),
+                [YAML nulls](https://yaml.org/type/null.html) or `none` in it
+                and use it appropriately.
+            1.  Cast to boolean using standard python `bool(value)`.
+    """
+    # Assume it's a number
+    with suppress(TypeError, ValueError):
+        return bool(float(value))
+    # Assume it's a string
+    with suppress(AttributeError):
+        lower = value.lower()
+        if lower in {"y", "yes", "t", "true", "on"}:
+            return True
+        elif lower in {"n", "no", "f", "false", "off", "~", "null", "none"}:
+            return False
+    # Assume nothing
+    return bool(value)
 
 
 def make_folder(folder: Path) -> None:
@@ -103,15 +137,32 @@ def to_nice_yaml(data: Any, **kwargs) -> str:
     return result or ""
 
 
+def get_jinja_env(
+    envops: "EnvOps",
+    filters: Optional[Filters] = None,
+    paths: Optional[LoaderPaths] = None,
+    **kwargs: Any,
+) -> SandboxedEnvironment:
+    """Return a pre-configured Jinja environment."""
+    loader = FileSystemLoader(paths) if paths else None
+    # We want to minimize the risk of hidden malware in the templates
+    # so we use the SandboxedEnvironment instead of the regular one.
+    # Of couse we still have the post-copy tasks to worry about, but at least
+    # they are more visible to the final user.
+    env = SandboxedEnvironment(loader=loader, **envops.dict(), **kwargs)
+    default_filters = {"to_nice_yaml": to_nice_yaml}
+    default_filters.update(filters or {})
+    env.filters.update(default_filters)
+    return env
+
+
 class Renderer:
-    def __init__(self, conf: ConfigData) -> None:
-        envops: EnvOps = conf.envops
+    """The Jinja template renderer."""
+
+    def __init__(self, conf: "ConfigData") -> None:
+        envops: "EnvOps" = conf.envops
         paths = [str(conf.src_path)] + list(map(str, conf.extra_paths or []))
-        # We want to minimize the risk of hidden malware in the templates
-        # so we use the SandboxedEnvironment instead of the regular one.
-        # Of couse we still have the post-copy tasks to worry about, but at least
-        # they are more visible to the final user.
-        self.env = SandboxedEnvironment(loader=FileSystemLoader(paths), **envops.dict())
+        self.env = get_jinja_env(envops=envops, paths=paths)
         self.conf = conf
         answers: AnyByStrDict = {}
         # All internal values must appear first
@@ -133,13 +184,10 @@ class Renderer:
             _copier_answers=answers,
             _copier_conf=conf.copy(deep=True, exclude={"data": {"now", "make_secret"}}),
         )
-        self.env.filters["to_nice_yaml"] = to_nice_yaml
 
     def __call__(self, fullpath: StrOrPath) -> str:
-        relpath = (
-            str(fullpath).replace(str(self.conf.src_path), "", 1).lstrip(os.path.sep)
-        )
-        tmpl = self.env.get_template(relpath)
+        relpath = Path(fullpath).relative_to(self.conf.src_path).as_posix()
+        tmpl = self.env.get_template(str(relpath))
         return tmpl.render(**self.data)
 
     def string(self, string: StrOrPath) -> str:
@@ -150,6 +198,18 @@ class Renderer:
 def normalize_str(text: StrOrPath, form: str = "NFD") -> str:
     """Normalize unicode text. Uses the NFD algorithm by default."""
     return unicodedata.normalize(form, str(text))
+
+
+def force_str_end(original_str: str, end: str = "\n") -> str:
+    """Make sure a `original_str` ends with `end`.
+
+    Params:
+        original_str: String that you want to ensure ending.
+        end: String that must exist at the end of `original_str`
+    """
+    if not original_str.endswith(end):
+        return original_str + end
+    return original_str
 
 
 def create_path_filter(patterns: StrOrPathSeq) -> CheckPathFunc:
@@ -163,7 +223,7 @@ def create_path_filter(patterns: StrOrPathSeq) -> CheckPathFunc:
     return match
 
 
-def get_migration_tasks(conf: ConfigData, stage: str) -> List[Dict]:
+def get_migration_tasks(conf: "ConfigData", stage: str) -> List[Dict]:
     """Get migration objects that match current version spec.
 
     Versions are compared using PEP 440.

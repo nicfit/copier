@@ -1,18 +1,20 @@
-import re
 from pathlib import Path
 
 import pytest
+from plumbum import local
 from pydantic import ValidationError
 
 import copier
 from copier.config.factory import make_config
-from copier.config.objects import DEFAULT_DATA, DEFAULT_EXCLUDE, ConfigData, EnvOps
+from copier.config.objects import DEFAULT_EXCLUDE, ConfigData, EnvOps
 from copier.config.user_data import (
     InvalidConfigFileError,
     MultipleConfigFilesError,
     load_config_data,
     load_yaml_data,
 )
+
+from .helpers import build_file_tree
 
 GOOD_ENV_OPS = {
     "autoescape": True,
@@ -36,24 +38,25 @@ def test_config_data_is_loaded_from_file():
 
 
 @pytest.mark.parametrize("template", ["tests/demo_yaml", "tests/demo_yml"])
-def test_read_data(dst, template):
-    copier.copy(template, dst, force=True)
-    gen_file = dst / "user_data.txt"
+def test_read_data(tmp_path, template):
+    copier.copy(template, tmp_path, force=True)
+    gen_file = tmp_path / "user_data.txt"
     result = gen_file.read_text()
     expected = Path("tests/reference_files/user_data.txt").read_text()
     assert result == expected
 
 
 def test_invalid_yaml(capsys):
-    conf_path = Path("tests/demo_invalid/copier.yml")
+    conf_path = Path("tests", "demo_invalid", "copier.yml")
     with pytest.raises(InvalidConfigFileError):
         load_yaml_data(conf_path)
-    out, _ = capsys.readouterr()
-    assert re.search(r"INVALID.*tests/demo_invalid/copier\.yml", out)
+    _, err = capsys.readouterr()
+    assert "INVALID CONFIG FILE" in err
+    assert str(conf_path) in err
 
 
 @pytest.mark.parametrize(
-    "conf_path,flags,check_out",
+    "conf_path,flags,check_err",
     (
         ("tests/demo_invalid", {"_warning": False}, lambda x: "INVALID" in x),
         ("tests/demo_invalid", {"quiet": True}, lambda x: x == ""),
@@ -63,17 +66,69 @@ def test_invalid_yaml(capsys):
         ("tests/demo_transclude_invalid_multi/demo", {}, None),
     ),
 )
-def test_invalid_config_data(conf_path, flags, check_out, capsys):
+def test_invalid_config_data(conf_path, flags, check_err, capsys):
     with pytest.raises(InvalidConfigFileError):
         load_config_data(conf_path, **flags)
-    if check_out:
-        out, _ = capsys.readouterr()
-        assert check_out(out)
+    if check_err:
+        _, err = capsys.readouterr()
+        assert check_err(err)
+
+
+def test_valid_multi_section(tmp_path):
+    """Including multiple files works fine merged with multiple sections."""
+    with local.cwd(tmp_path):
+        build_file_tree(
+            {
+                "exclusions.yml": "_exclude: ['*.yml']",
+                "common_jinja.yml": """
+                    _envops:
+                        block_start_string: "[%"
+                        block_end_string: "%]"
+                        comment_start_string: "[#"
+                        comment_end_string: "#]"
+                        variable_start_string: "[["
+                        variable_end_string: "]]"
+                        keep_trailing_newline: true
+                    """,
+                "common_questions.yml": """
+                    your_age:
+                        type: int
+                    your_name:
+                        type: yaml
+                        help: your name from common questions
+                    """,
+                "copier.yml": """
+                    ---
+                    !include 'common_*.yml'
+                    ---
+                    !include exclusions.yml
+                    ---
+                    your_name:
+                        type: str
+                        help: your name from latest section
+                    """,
+            }
+        )
+    data = load_config_data(tmp_path)
+    assert data == {
+        "_exclude": ["*.yml"],
+        "_envops": {
+            "block_start_string": "[%",
+            "block_end_string": "%]",
+            "comment_start_string": "[#",
+            "comment_end_string": "#]",
+            "variable_start_string": "[[",
+            "variable_end_string": "]]",
+            "keep_trailing_newline": True,
+        },
+        "your_age": {"type": "int"},
+        "your_name": {"type": "str", "help": "your name from latest section"},
+    }
 
 
 def test_config_data_empty():
     data = load_config_data("tests/demo_config_empty")
-    assert data is None
+    assert data == {}
 
 
 def test_multiple_config_file_error(capsys):
@@ -143,12 +198,12 @@ def test_config_data_paths_required():
         raise AssertionError()
 
 
-def test_config_data_paths_existing(dst):
+def test_config_data_paths_existing(tmp_path):
     try:
         ConfigData(
             src_path="./i_do_not_exist",
             extra_paths=["./i_do_not_exist"],
-            dst_path=dst,
+            dst_path=tmp_path,
             envops=EnvOps(),
         )
     except ValidationError as e:
@@ -161,15 +216,14 @@ def test_config_data_paths_existing(dst):
         raise AssertionError()
 
 
-def test_config_data_good_data(dst):
-    dst = Path(dst).expanduser().resolve()
+def test_config_data_good_data(tmp_path):
+    tmp_path = Path(tmp_path).expanduser().resolve()
     expected = {
-        "src_path": dst,
+        "src_path": tmp_path,
         "commit": None,
         "old_commit": None,
-        "dst_path": dst,
-        "data": DEFAULT_DATA,
-        "extra_paths": [dst],
+        "dst_path": tmp_path,
+        "extra_paths": [tmp_path],
         "exclude": DEFAULT_EXCLUDE,
         "original_src_path": None,
         "skip_if_exists": ["skip_me"],
@@ -185,27 +239,30 @@ def test_config_data_good_data(dst):
         "vcs_ref": None,
         "migrations": (),
         "secret_questions": (),
+        "subdirectory": None,
     }
     conf = ConfigData(**expected)
-    expected["data"]["_folder_name"] = dst.name
+    conf.data["_folder_name"] = tmp_path.name
     expected["answers_file"] = Path(".copier-answers.yml")
-    assert conf.dict() == expected
+    conf_dict = conf.dict()
+    for key, value in expected.items():
+        assert conf_dict[key] == value
 
 
-def test_make_config_bad_data(dst):
+def test_make_config_bad_data(tmp_path):
     with pytest.raises(ValidationError):
-        make_config("./i_do_not_exist", dst)
+        make_config("./i_do_not_exist", tmp_path)
 
 
 def is_subdict(small, big):
     return {**big, **small} == big
 
 
-def test_make_config_good_data(dst):
-    conf = make_config("./tests/demo_data", dst)
+def test_make_config_good_data(tmp_path):
+    conf = make_config("./tests/demo_data", tmp_path)
     assert conf is not None
     assert "_folder_name" in conf.data
-    assert conf.data["_folder_name"] == dst.name
+    assert conf.data["_folder_name"] == tmp_path.name
     assert conf.exclude == ["exclude1", "exclude2"]
     assert conf.skip_if_exists == ["skip_if_exists1", "skip_if_exists2"]
     assert conf.tasks == ["touch 1", "touch 2"]
@@ -216,13 +273,19 @@ def test_make_config_good_data(dst):
     "test_input, expected",
     [
         # func_args > defaults
-        ({"src_path": ".", "exclude": ["aaa"]}, {"exclude": ["aaa"]}),
+        (
+            {"src_path": ".", "exclude": ["aaa"]},
+            {"exclude": list(DEFAULT_EXCLUDE) + ["aaa"]},
+        ),
         # func_args > user_data
-        ({"src_path": "tests/demo_data", "exclude": ["aaa"]}, {"exclude": ["aaa"]}),
+        (
+            {"src_path": "tests/demo_data", "exclude": ["aaa"]},
+            {"exclude": ["exclude1", "exclude2", "aaa"]},
+        ),
     ],
 )
-def test_make_config_precedence(dst, test_input, expected):
-    conf = make_config(dst_path=dst, vcs_ref="HEAD", **test_input)
+def test_make_config_precedence(tmp_path, test_input, expected):
+    conf = make_config(dst_path=tmp_path, vcs_ref="HEAD", **test_input)
     assert is_subdict(expected, conf.dict())
 
 

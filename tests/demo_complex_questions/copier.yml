@@ -11,8 +11,10 @@ your_height:
   help: What's your height?
   type: float
 more_json_info:
+  multiline: true
   type: json
 anything_else:
+  multiline: true
   help: Wanna give me any more info?
 
 # In choices, the user will always write the choice index (1, 2, 3...)
@@ -37,6 +39,14 @@ choose_dict:
     one: first
     two: second
     three: third
+choose_number:
+  help: This must be a number
+  default: null
+  type: float
+  choices:
+    - -1.1
+    - 0
+    - 1
 
 # Simplified format is still supported
 minutes_under_water: 10
